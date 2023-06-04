@@ -162,16 +162,29 @@ def train(
         return result
 
     def generate_and_tokenize_prompt(data_point):
-        full_prompt = prompter.generate_prompt(
-            data_point["instruction"],
-            data_point["input"],
-            data_point["output"],
-        )
+        if prompt_template_name == "reranker":
+            full_prompt = prompter.generate_prompt(
+                data_point["instruction"],
+                data_point["input"],
+                data_point["output"],
+                num=data_point["num"],
+            )
+        else:
+            full_prompt = prompter.generate_prompt(
+                data_point["instruction"],
+                data_point["input"],
+                data_point["output"],
+            )
         tokenized_full_prompt = tokenize(full_prompt)
         if not train_on_inputs:
-            user_prompt = prompter.generate_prompt(
-                data_point["instruction"], data_point["input"]
-            )
+            if prompt_template_name == "reranker":
+                user_prompt = prompter.generate_prompt(
+                    data_point["instruction"], data_point["input"], num=data_point["num"],
+                )
+            else:
+                user_prompt = prompter.generate_prompt(
+                    data_point["instruction"], data_point["input"]
+                )
             tokenized_user_prompt = tokenize(
                 user_prompt, add_eos_token=add_eos_token
             )

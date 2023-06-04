@@ -30,10 +30,15 @@ class Prompter(object):
         instruction: str,
         input: Union[None, str] = None,
         label: Union[None, str] = None,
+        num: Union[None, str] = None,
     ) -> str:
         # returns the full prompt from instruction and optional input
         # if a label (=response, =output) is provided, it's also appended.
-        if input:
+        if input and num:
+            res = self.template["prompt_input"].format(
+                num=num, instruction=instruction, input=input
+            )
+        elif input:
             res = self.template["prompt_input"].format(
                 instruction=instruction, input=input
             )
