@@ -95,7 +95,10 @@ def main(
         stream_output=False,
         **kwargs,
     ):
-        prompt = prompter.generate_prompt(instruction, input)
+        if prompt_template == "reranker":
+            prompt = prompter.generate_prompt(instruction, input, num=10)
+        else:
+            prompt = prompter.generate_prompt(instruction, input)
         inputs = tokenizer(prompt, return_tensors="pt")
         input_ids = inputs["input_ids"].to(device)
         generation_config = GenerationConfig(
