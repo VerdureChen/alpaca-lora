@@ -81,7 +81,7 @@ def evaluate(
         generate_config: GenerationConfig,
         data_list: list = ['dl19', 'dl20', 'covid', 'arguana', 'touche', 'news', 'scifact', 'fiqa', 'scidocs', 'nfc', 'quora', 'dbpedia', 'fever', 'robust04', 'signal'],
         lora_weights: str = "tloen/alpaca-lora-7b",
-        rank_end: int = 10,
+        rank_end: int = 100,
 ):
     for data in data_list:
         print('#' * 20)
@@ -96,7 +96,10 @@ def evaluate(
 
         # Run sliding window permutation generation
         new_results = []
-        for item in tqdm(rank_results):
+        for i, item in enumerate(tqdm(rank_results)):
+            # if i <200:
+            #     continue
+
             new_item = sliding_windows(item, rank_start=0, rank_end=rank_end, window_size=10, step=5,
                                        model=model, tokenizer=tokenizer, prompter=prompter, generate_config=generate_config,
                                        device=device)

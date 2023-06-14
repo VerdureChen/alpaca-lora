@@ -100,6 +100,7 @@ def main(
         else:
             prompt = prompter.generate_prompt(instruction, input)
         inputs = tokenizer(prompt, return_tensors="pt")
+        print(prompt)
         input_ids = inputs["input_ids"].to(device)
         generation_config = GenerationConfig(
             temperature=temperature,

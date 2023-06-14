@@ -95,9 +95,9 @@ def create_permutation_instruction(item=None, rank_start=0, rank_end=100, prompt
         '',
         num=num,
     )
-    if num_tokens_from_messages(tokenizer, full_prompt) > 2046:
+    if num_tokens_from_messages(tokenizer, full_prompt) > 2000:
         prompt_without_length = num_tokens_from_messages(tokenizer, prompt_without_input)
-        average_passage_length = int((2046 - prompt_without_length) / num)
+        average_passage_length = int((2000 - prompt_without_length) / num)
         for passage in passage_lst:
             passage_tokenized = num_tokens_from_messages(tokenizer, passage['content'], return_tokenized=True)
             passage_token_num = passage_tokenized[0]
@@ -136,7 +136,7 @@ def run_llm(messages, model=None, tokenizer=None, generate_config=None, device='
 def clean_response(response: str):
     new_response = ''
     for c in response:
-        if not c.isdigit():
+        if not c.isdecimal():
             new_response += ' '
         else:
             new_response += c

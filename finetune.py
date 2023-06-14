@@ -50,7 +50,7 @@ def train(
     batch_size: int = 128,
     micro_batch_size: int = 4,
     num_epochs: int = 3,
-    learning_rate: float = 3e-4,
+    learning_rate: float = 6e-4,
     cutoff_len: int = 256,
     val_set_size: int = 2000,
     # lora hyperparams
@@ -282,7 +282,6 @@ def train(
             group_by_length=group_by_length,
             report_to="wandb" if use_wandb else None,
             run_name=wandb_run_name if use_wandb else None,
-            lr_scheduler_type="warmup_cosine",
         ),
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
