@@ -1,15 +1,16 @@
 #!/bin/bash
 
-datasets=("dl19" "dl20" "covid" "touche" "news" "signal" "dbpedia" "scifact" "nfc" "robust04")
-num_gpus=8
+datasets=("dl19" "dbpedia" "dl20" "nfc" "covid"  "robust04" "signal" "touche" "news" "scifact")
+num_gpus=5
+num_datasets=${#datasets[@]}
+
+datasets_per_gpu=$(( (num_datasets + num_gpus - 1) / num_gpus ))
 
 for ((gpu=0; gpu<num_gpus; gpu++)); do
-    if (( gpu < 2 )); then
-        start_index=$(( gpu * 2 ))
-        end_index=$(( start_index + 1 ))
-    else
-        start_index=$(( 4 + (gpu - 2) ))
-        end_index=$start_index
+    start_index=$(( gpu * datasets_per_gpu ))
+    end_index=$(( start_index + datasets_per_gpu - 1 ))
+    if (( end_index >= num_datasets )); then
+        end_index=$(( num_datasets - 1 ))
     fi
 
     data_list=""
@@ -22,7 +23,7 @@ for ((gpu=0; gpu<num_gpus; gpu++)); do
     done
 
     master_port=$(( 1224 + gpu ))
-    log_file="logs/log_gpu${gpu}_100_${data_list}.log"
+    log_file="logs/log_gpu${gpu}_${data_list}.log"
 
     # shellcheck disable=SC2089
     command="CUDA_VISIBLE_DEVICES=$gpu torchrun --nproc_per_node=1 --master_port=$master_port evaluation.py \
@@ -32,5 +33,5 @@ for ((gpu=0; gpu<num_gpus; gpu++)); do
         --prompt_template 'reranker' \
         --data_list '$data_list' > $log_file 2>&1 &"
     echo $command
-    eval $command
+#    eval $command
 done
