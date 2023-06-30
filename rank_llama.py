@@ -2,9 +2,15 @@ import copy
 from tqdm import tqdm
 import torch
 import json
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import torch.nn.functional as F
+from torch.nn import DataParallel
 
+model, tokenizer, device = load_model()
 
-def run_retriever(topics, searcher, qrels=None, k=100, qid=None):
+def run_retriever(topics, searcher, qrels=None, k=100, qid=None, max_length=256):
+    # if content is longer than max_length, cut it into chunks, and compute the similarity score for each chunk, take the chunk with max score as the representative
     ranks = []
     if isinstance(topics, str):
         hits = searcher.search(topics, k=k)
@@ -21,6 +27,8 @@ def run_retriever(topics, searcher, qrels=None, k=100, qid=None):
             ranks[-1]['hits'].append({
                 'content': content,
                 'qid': qid, 'docid': hit.docid, 'rank': rank, 'score': hit.score})
+        # cut the content into chunks, and compute the similarity score for each chunk, take the chunk with max score as the representative
+        ranks[-1] = cut_relevant_chunks(ranks[-1], model, tokenizer, device, max_length=max_length)
         return ranks[-1]
 
     for qid in tqdm(topics):
@@ -40,7 +48,57 @@ def run_retriever(topics, searcher, qrels=None, k=100, qid=None):
                 ranks[-1]['hits'].append({
                     'content': content,
                     'qid': qid, 'docid': hit.docid, 'rank': rank, 'score': hit.score})
+            # cut the content into chunks, and compute the similarity score for each chunk, take the chunk with max score as the representative
+            ranks[-1] = cut_relevant_chunks(ranks[-1], model, tokenizer, device, max_length=max_length)
     return ranks
+
+def cut_relevant_chunks(item, model, tokenizer, device, max_length=512):
+    query = item['query']
+    hits = item['hits']
+    num = len(hits)
+    # features = tokenizer(['How many people live in Berlin?', 'How many people live in Berlin?'], ['Berlin has a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.', 'New York City is famous for the Metropolitan Museum of Art.'],  padding=True, truncation=True, return_tensors="pt")
+    # for each hit, cut the content into chunks, for each chunk, compute the similarity score with the query, and take the chunk with max score as the representative
+
+    for hit in hits:
+        # cut the content into chunks with overlap of 50% max_length
+        content = hit['content']
+        content = content.replace('Title: Content: ', '')
+        content = content.strip()
+        # For Japanese should cut by character: content = content[:int(max_length)]
+        # content = ' '.join(content.split()[:int(max_length)])
+        passage_lst = []
+        for i in range(0, len(content), int(max_length/2)):
+            passage_lst.append(content[i:i+max_length])
+        # compute the similarity score for each chunk
+        # features = tokenizer(['How many people live in Berlin?', 'How many people live in Berlin?'], ['Berlin has a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.', 'New York City is famous for the Metropolitan Museum of Art.'],  padding=True, truncation=True, return_tensors="pt")
+        # process passage_lst in batch
+        features = tokenizer([query]*len(passage_lst), passage_lst,  padding=True, truncation=True, return_tensors="pt")
+        features = features.to(device)
+        with torch.no_grad():
+            outputs = model(**features)
+            logits = outputs.logits
+            logits = F.softmax(logits, dim=1)
+            scores = logits[:, 1].tolist()
+        # take the chunk with max score as the representative
+        max_score = max(scores)
+        max_idx = scores.index(max_score)
+        hit['content'] = passage_lst[max_idx]
+        hit['score'] = max_score
+    return item
+
+
+def load_model():
+    model = AutoModelForSequenceClassification.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
+    tokenizer = AutoTokenizer.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs")
+        model = DataParallel(model)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model.to(device)
+    model.eval()
+    return model, tokenizer, device
 
 
 def write_eval_file(rank_results, file):
@@ -136,7 +194,7 @@ def run_llm(messages, model=None, tokenizer=None, generate_config=None, device='
 def clean_response(response: str):
     new_response = ''
     for c in response:
-        if not c.isdecimal():
+        if not c.isdigit():
             new_response += ' '
         else:
             new_response += c
