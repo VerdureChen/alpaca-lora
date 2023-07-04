@@ -7,6 +7,19 @@ import torch
 import torch.nn.functional as F
 from torch.nn import DataParallel
 
+def load_model():
+    model = AutoModelForSequenceClassification.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
+    tokenizer = AutoTokenizer.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs")
+        model = DataParallel(model)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model.to(device)
+    model.eval()
+    return model, tokenizer, device
+
 model, tokenizer, device = load_model()
 
 def run_retriever(topics, searcher, qrels=None, k=100, qid=None, max_length=256):
@@ -56,6 +69,8 @@ def cut_relevant_chunks(item, model, tokenizer, device, max_length=512):
     query = item['query']
     hits = item['hits']
     num = len(hits)
+    mini_batch_size = 16
+    # print(f"num of hits: {num}, max_length: {max_length}")
     # features = tokenizer(['How many people live in Berlin?', 'How many people live in Berlin?'], ['Berlin has a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.', 'New York City is famous for the Metropolitan Museum of Art.'],  padding=True, truncation=True, return_tensors="pt")
     # for each hit, cut the content into chunks, for each chunk, compute the similarity score with the query, and take the chunk with max score as the representative
 
@@ -72,33 +87,31 @@ def cut_relevant_chunks(item, model, tokenizer, device, max_length=512):
         # compute the similarity score for each chunk
         # features = tokenizer(['How many people live in Berlin?', 'How many people live in Berlin?'], ['Berlin has a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.', 'New York City is famous for the Metropolitan Museum of Art.'],  padding=True, truncation=True, return_tensors="pt")
         # process passage_lst in batch
-        features = tokenizer([query]*len(passage_lst), passage_lst,  padding=True, truncation=True, return_tensors="pt")
-        features = features.to(device)
-        with torch.no_grad():
-            outputs = model(**features)
-            logits = outputs.logits
-            logits = F.softmax(logits, dim=1)
-            scores = logits[:, 1].tolist()
+        all_logits = []
+        # print(f"num of chunks: {len(passage_lst)}")
+        for i in range(0, len(passage_lst), mini_batch_size):
+            # print(f"batch: {i}")
+            batch = passage_lst[i:i + mini_batch_size]
+            features = tokenizer([query] * len(batch), batch, padding=True, truncation=True, return_tensors="pt")
+            features = features.to(device)
+            with torch.no_grad():
+                outputs = model(**features)
+                logits = outputs.logits
+                all_logits.extend(logits.tolist())
+
+        # Apply the softmax to all logits after all batches processed
+        all_logits = torch.tensor(all_logits).to(device)
+        softmax_logits = F.softmax(all_logits, dim=0)
+        # print(softmax_logits)
+        scores = [float(score[0]) for score in softmax_logits]
+
         # take the chunk with max score as the representative
         max_score = max(scores)
         max_idx = scores.index(max_score)
         hit['content'] = passage_lst[max_idx]
-        hit['score'] = max_score
+        # hit['score'] = max_score
     return item
 
-
-def load_model():
-    model = AutoModelForSequenceClassification.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
-    tokenizer = AutoTokenizer.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs")
-        model = DataParallel(model)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model.to(device)
-    model.eval()
-    return model, tokenizer, device
 
 
 def write_eval_file(rank_results, file):

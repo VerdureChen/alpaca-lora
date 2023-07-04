@@ -94,6 +94,12 @@ def evaluate(
         qrels = get_qrels(THE_TOPICS[data])
         rank_results = run_retriever(topics, searcher, qrels, k=100)
 
+        # Evaluate nDCG@10
+        from trec_eval import EvalFunction
+        temp_file_bm25 = f'result/{lora_weights.split("/")[-1]}/{data}_{rank_end}_BM25.txt'
+        write_eval_file(rank_results, temp_file_bm25)
+        EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data], temp_file_bm25])
+
         # Run sliding window permutation generation
         new_results = []
         for i, item in enumerate(tqdm(rank_results)):
@@ -106,8 +112,6 @@ def evaluate(
             new_results.append(new_item)
             # break
 
-        # Evaluate nDCG@10
-        from trec_eval import EvalFunction
 
         # temp_file = tempfile.NamedTemporaryFile(delete=False).name
         # the path of the temp_file is in the /result/{lora_weights}.split('/')directory on the root of the project
@@ -145,11 +149,12 @@ def main(
             torch_dtype=torch.float16,
             device_map="auto",
         )
-        model = PeftModel.from_pretrained(
-            model,
-            lora_weights,
-            torch_dtype=torch.float16,
-        )
+        print('no lora')
+        # model = PeftModel.from_pretrained(
+        #     model,
+        #     lora_weights,
+        #     torch_dtype=torch.float16,
+        # )
     elif device == "mps":
         model = LlamaForCausalLM.from_pretrained(
             base_model,
