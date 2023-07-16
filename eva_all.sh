@@ -19,15 +19,15 @@ for ((gpu=0; gpu<num_gpus; gpu++)); do
     fi
 
     master_port=$(( 1224 + gpu ))
-    log_file="logs/full_log/log_gpu${gpu}_${data_list}_fulldbg.log"
+    log_file="logs/wtf/log_gpu${gpu}_${data_list}_lora.log"
 
     # shellcheck disable=SC2089
     gpu_number=${gpu_num[$gpu]}
     command="CUDA_VISIBLE_DEVICES=$gpu_number torchrun --nproc_per_node=1 --master_port=$master_port evaluation.py \
         --load_8bit \
-        --base_model './models/reranker-full-alpaca' \
-        --lora_weights './lora-alpaca-reranker-100k-bm25-gpt' \
-        --prompt_template 'reranker' \
+        --base_model './llama-7b-hf' \
+        --lora_weights './models/wtf/rank_weight' \
+        --prompt_template 'alpaca' \
         --data_list '$data_list' > $log_file 2>&1 &"
     echo $command
     eval $command

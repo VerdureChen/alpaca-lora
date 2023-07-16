@@ -2,29 +2,11 @@ import copy
 from tqdm import tqdm
 import torch
 import json
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
-import torch.nn.functional as F
-from torch.nn import DataParallel
+import time
 
-def load_model():
-    model = AutoModelForSequenceClassification.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
-    tokenizer = AutoTokenizer.from_pretrained('cross-encoder/ms-marco-MiniLM-L-12-v2')
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs")
-        model = DataParallel(model)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model.to(device)
-    model.eval()
-    return model, tokenizer, device
-
-model, tokenizer, device = load_model()
-
-def run_retriever(topics, searcher, qrels=None, k=100, qid=None, max_length=256):
-    # if content is longer than max_length, cut it into chunks, and compute the similarity score for each chunk, take the chunk with max score as the representative
+def run_retriever(topics, searcher, qrels=None, k=100, qid=None, text_is_passage=False):
     ranks = []
+    text_key = 'passage' if text_is_passage else 'text'
     if isinstance(topics, str):
         hits = searcher.search(topics, k=k)
         ranks.append({'query': topics, 'hits': []})
@@ -33,15 +15,13 @@ def run_retriever(topics, searcher, qrels=None, k=100, qid=None, max_length=256)
             rank += 1
             content = json.loads(searcher.doc(hit.docid).raw())
             if 'title' in content:
-                content = 'Title: ' + content['title'] + ' ' + 'Content: ' + content['text']
+                content = 'Title: ' + content['title'] + ' ' + 'Content: ' + content[text_key]
             else:
-                content = content['contents']
+                content = content[text_key]
             content = ' '.join(content.split())
             ranks[-1]['hits'].append({
                 'content': content,
                 'qid': qid, 'docid': hit.docid, 'rank': rank, 'score': hit.score})
-        # cut the content into chunks, and compute the similarity score for each chunk, take the chunk with max score as the representative
-        ranks[-1] = cut_relevant_chunks(ranks[-1], model, tokenizer, device, max_length=max_length)
         return ranks[-1]
 
     for qid in tqdm(topics):
@@ -53,65 +33,16 @@ def run_retriever(topics, searcher, qrels=None, k=100, qid=None, max_length=256)
             for hit in hits:
                 rank += 1
                 content = json.loads(searcher.doc(hit.docid).raw())
-                if 'title' in content:
-                    content = 'Title: ' + content['title'] + ' ' + 'Content: ' + content['text']
+                # if the title is not empty, add it to the content
+                if 'title' in content and content['title'] != '':
+                    content = 'Title: ' + content['title'] + ' ' + 'Content: ' + content[text_key]
                 else:
-                    content = content['contents']
+                    content = content[text_key]
                 content = ' '.join(content.split())
                 ranks[-1]['hits'].append({
                     'content': content,
                     'qid': qid, 'docid': hit.docid, 'rank': rank, 'score': hit.score})
-            # cut the content into chunks, and compute the similarity score for each chunk, take the chunk with max score as the representative
-            ranks[-1] = cut_relevant_chunks(ranks[-1], model, tokenizer, device, max_length=max_length)
     return ranks
-
-def cut_relevant_chunks(item, model, tokenizer, device, max_length=512):
-    query = item['query']
-    hits = item['hits']
-    num = len(hits)
-    mini_batch_size = 16
-    # print(f"num of hits: {num}, max_length: {max_length}")
-    # features = tokenizer(['How many people live in Berlin?', 'How many people live in Berlin?'], ['Berlin has a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.', 'New York City is famous for the Metropolitan Museum of Art.'],  padding=True, truncation=True, return_tensors="pt")
-    # for each hit, cut the content into chunks, for each chunk, compute the similarity score with the query, and take the chunk with max score as the representative
-
-    for hit in hits:
-        # cut the content into chunks with overlap of 50% max_length
-        content = hit['content']
-        content = content.replace('Title: Content: ', '')
-        content = content.strip()
-        # For Japanese should cut by character: content = content[:int(max_length)]
-        # content = ' '.join(content.split()[:int(max_length)])
-        passage_lst = []
-        for i in range(0, len(content), int(max_length/2)):
-            passage_lst.append(content[i:i+max_length])
-        # compute the similarity score for each chunk
-        # features = tokenizer(['How many people live in Berlin?', 'How many people live in Berlin?'], ['Berlin has a population of 3,520,031 registered inhabitants in an area of 891.82 square kilometers.', 'New York City is famous for the Metropolitan Museum of Art.'],  padding=True, truncation=True, return_tensors="pt")
-        # process passage_lst in batch
-        all_logits = []
-        # print(f"num of chunks: {len(passage_lst)}")
-        for i in range(0, len(passage_lst), mini_batch_size):
-            # print(f"batch: {i}")
-            batch = passage_lst[i:i + mini_batch_size]
-            features = tokenizer([query] * len(batch), batch, padding=True, truncation=True, return_tensors="pt")
-            features = features.to(device)
-            with torch.no_grad():
-                outputs = model(**features)
-                logits = outputs.logits
-                all_logits.extend(logits.tolist())
-
-        # Apply the softmax to all logits after all batches processed
-        all_logits = torch.tensor(all_logits).to(device)
-        softmax_logits = F.softmax(all_logits, dim=0)
-        # print(softmax_logits)
-        scores = [float(score[0]) for score in softmax_logits]
-
-        # take the chunk with max score as the representative
-        max_score = max(scores)
-        max_idx = scores.index(max_score)
-        hit['content'] = passage_lst[max_idx]
-        # hit['score'] = max_score
-    return item
-
 
 
 def write_eval_file(rank_results, file):
@@ -140,51 +71,115 @@ def num_tokens_from_messages(tokenizer, messages, max_tokens=2048, return_tokeni
     return num_tokens if not return_tokenized else (num_tokens, passage_tokenized)
 
 
+# def create_permutation_instruction(item=None, rank_start=0, rank_end=100, prompter=None, tokenizer=None):
+#     query = item['query']
+#     num = len(item['hits'][rank_start: rank_end])
+#
+#     max_length = 300
+#     passage_lst = []
+#     rank = 0
+#     for hit in item['hits'][rank_start: rank_end]:
+#         rank += 1
+#         content = hit['content']
+#         # content = content.replace('Title: Content: ', '')
+#         # content = content.strip()
+#         # For Japanese should cut by character: content = content[:int(max_length)]
+#         # content = ' '.join(content.split()[:int(max_length)])
+#         passage_lst.append({'rank': rank, 'content': content})
+#     input_text = '\n'.join([f"[{item['rank']}] {item['content']}" for item in passage_lst])
+#     full_prompt = prompter.generate_prompt(
+#         query,
+#         input_text,
+#         num=num,
+#     )
+#     prompt_without_input = prompter.generate_prompt(
+#         query,
+#         '',
+#         num=num,
+#     )
+#     if num_tokens_from_messages(tokenizer, full_prompt) > 2000:
+#         prompt_without_length = num_tokens_from_messages(tokenizer, prompt_without_input)
+#         average_passage_length = int((2000 - prompt_without_length) / num)
+#         for passage in passage_lst:
+#             passage_tokenized = num_tokens_from_messages(tokenizer, passage['content'], return_tokenized=True)
+#             passage_token_num = passage_tokenized[0]
+#             if passage_token_num > average_passage_length:
+#                 passage['content'] = tokenizer.decode(passage_tokenized[1][0][:average_passage_length])
+#                 print(f'query is {query}, passage_rank is {passage["rank"]}')
+#                 print(f'the length of the truncated passage is {average_passage_length}')
+#                 print(f'the length of the original passage is {passage_token_num}')
+#     input_text = '\n'.join([f"[{item['rank']}] {item['content']}" for item in passage_lst])
+#     print(f'the length of the input text is {num_tokens_from_messages(tokenizer, input_text)}')
+#     full_prompt = prompter.generate_prompt(
+#         query,
+#         input_text,
+#         num=num,
+#     )
+#
+#     return full_prompt
+
+
 def create_permutation_instruction(item=None, rank_start=0, rank_end=100, prompter=None, tokenizer=None):
     query = item['query']
-    num = len(item['hits'][rank_start: rank_end])
+    hits = item['hits'][rank_start: rank_end]
+    num = len(hits)
 
     max_length = 300
-    passage_lst = []
-    rank = 0
-    for hit in item['hits'][rank_start: rank_end]:
-        rank += 1
-        content = hit['content']
-        # content = content.replace('Title: Content: ', '')
-        # content = content.strip()
-        # For Japanese should cut by character: content = content[:int(max_length)]
-        # content = ' '.join(content.split()[:int(max_length)])
-        passage_lst.append({'rank': rank, 'content': content})
-    input_text = '\n'.join([f"[{item['rank']}] {item['content']}" for item in passage_lst])
-    full_prompt = prompter.generate_prompt(
-        query,
-        input_text,
-        num=num,
-    )
-    prompt_without_input = prompter.generate_prompt(
-        query,
-        '',
-        num=num,
-    )
-    if num_tokens_from_messages(tokenizer, full_prompt) > 2000:
-        prompt_without_length = num_tokens_from_messages(tokenizer, prompt_without_input)
-        average_passage_length = int((2000 - prompt_without_length) / num)
-        for passage in passage_lst:
-            passage_tokenized = num_tokens_from_messages(tokenizer, passage['content'], return_tokenized=True)
-            passage_token_num = passage_tokenized[0]
-            if passage_token_num > average_passage_length:
-                passage['content'] = tokenizer.decode(passage_tokenized[1][0][:average_passage_length])
-                print(f'query is {query}, passage_rank is {passage["rank"]}')
-                print(f'the length of the truncated passage is {average_passage_length}')
-                print(f'the length of the original passage is {passage_token_num}')
-    input_text = '\n'.join([f"[{item['rank']}] {item['content']}" for item in passage_lst])
-    print(f'the length of the input text is {num_tokens_from_messages(tokenizer, input_text)}')
-    full_prompt = prompter.generate_prompt(
-        query,
-        input_text,
-        num=num,
-    )
+    passages = [{'rank': rank + 1, 'content': hit['content']} for rank, hit in enumerate(hits)]
 
+    # Batch process passages
+    contents = [p['content'] for p in passages]
+    tokenized_contents = tokenizer(contents, truncation=False, padding=False, return_tensors=None)['input_ids']
+
+    # Calculate average passage length
+    max_tokens = 2000 - num_tokens_from_messages(tokenizer, prompter.generate_prompt(query, '', num=num))
+    average_passage_length = max_tokens // num
+
+    for passage, tokenized_content in zip(passages, tokenized_contents):
+        passage_token_num = len(tokenized_content)
+        if passage_token_num > average_passage_length:
+            passage['content'] = tokenizer.decode(tokenized_content[:average_passage_length])
+            print(f'query is {query}, passage_rank is {passage["rank"]}')
+            print(f'the length of the truncated passage is {average_passage_length}')
+            print(f'the length of the original passage is {passage_token_num}')
+
+    # Generate full prompt
+    input_text = '\n'.join([f"[{p['rank']}] {p['content']}" for p in passages])
+    print(f'the length of the input text is {num_tokens_from_messages(tokenizer, input_text)}')
+    full_prompt = prompter.generate_prompt(query, input_text, num=num)
+
+    return full_prompt
+
+
+def create_wtf_permutation_instruction(item=None, rank_start=0, rank_end=100, prompter=None, tokenizer=None):
+    query = item['query']
+    hits = item['hits'][rank_start: rank_end]
+    num = len(hits)
+    instruction = "Please rank these passage based on their relevance to the query"
+    query_text = "{query:" + query + "}\n"
+    passages = [{'rank': rank + 1, 'content': hit['content']} for rank, hit in enumerate(hits)]
+
+    # Batch process passages
+    contents = [p['content'] for p in passages]
+    tokenized_contents = tokenizer(contents, truncation=False, padding=False, return_tensors=None)['input_ids']
+
+    # Calculate average passage length
+    max_tokens = 2000 - num_tokens_from_messages(tokenizer, prompter.generate_prompt(instruction, query_text, num=num))
+    average_passage_length = max_tokens // num
+
+    for passage, tokenized_content in zip(passages, tokenized_contents):
+        passage_token_num = len(tokenized_content)
+        if passage_token_num > average_passage_length:
+            passage['content'] = tokenizer.decode(tokenized_content[1:average_passage_length])
+            print(f'query is {query}, passage_rank is {passage["rank"]}')
+            print(f'the length of the truncated passage is {average_passage_length}')
+            print(f'the length of the original passage is {passage_token_num}')
+
+    # Generate full prompt
+    input_text = '\n'.join([f"[{p['rank']}] {p['content']}" for p in passages])
+    print(f'the length of the input text is {num_tokens_from_messages(tokenizer, input_text)}')
+    full_prompt = prompter.generate_prompt(instruction, query_text+input_text, num=num)
+    # print("full prompt is: ", full_prompt)
     return full_prompt
 
 
@@ -242,12 +237,24 @@ def receive_permutation(item, permutation, rank_start=0, rank_end=100):
 
 def permutation_pipeline(item=None, rank_start=0, rank_end=100, model=None, tokenizer=None, prompter=None,
                          generate_config=None, device='cuda'):
-    messages = create_permutation_instruction(item=item, rank_start=rank_start, rank_end=rank_end, prompter=prompter, tokenizer=tokenizer)
+    # count time for each step
+
+    time_start = time.time()
+    # messages = create_permutation_instruction(item=item, rank_start=rank_start, rank_end=rank_end, prompter=prompter, tokenizer=tokenizer)
+    messages = create_wtf_permutation_instruction(item=item, rank_start=rank_start, rank_end=rank_end, prompter=prompter, tokenizer=tokenizer)
+    time_end = time.time()
+    print(f'create_permutation_instruction takes {time_end - time_start} seconds')
     # print(f'messages is {messages}')
+    time_start = time.time()
     permutation = run_llm(messages, model=model, tokenizer=tokenizer, generate_config=generate_config, device=device, prompter=prompter)
     # print(f'permutation is {permutation}')
+    time_end = time.time()
+    print(f'run_llm takes {time_end - time_start} seconds')
+    time_start = time.time()
     item = receive_permutation(item, permutation, rank_start=rank_start, rank_end=rank_end)
     # print(f'item is {item}')
+    time_end = time.time()
+    print(f'receive_permutation takes {time_end - time_start} seconds')
     return item
 
 
@@ -267,6 +274,43 @@ def sliding_windows(item=None, rank_start=0, rank_end=100, window_size=20, step=
         end_pos = end_pos - step
         start_pos = start_pos - step
     return item
+
+
+def get_custom_topics(queries_file, qrels, filter_qids=True):
+    '''
+
+    :param queries_file: format like '2000138	How does the process of digestion and metabolism of carbohydrates start'
+    :return: 
+    '''''
+    # return queries like: {264014: {'title': 'how long is life cycle of flea'}, 104861: {'title': 'cost of interior concrete flooring'}}
+    if filter_qids:
+        print('filtering queries')
+    queries = {}
+    with open(queries_file, 'r') as f:
+        for line in f:
+            line = line.strip().split('\t')
+            if filter_qids:
+                if line[0] not in qrels:
+                    continue
+            qid = line[0]
+            query = line[1]
+            queries[qid] = {'title': query}
+    return queries
+
+
+# qrels like:{47923: {1200258: '2', 1236611: '0', 1296110: '1', 1300989: '1', 1354790: '1', 1463436: '0', 1507610: '1'}}
+def get_custom_qrels(qrels_file):
+    qrels = {}
+    with open(qrels_file, 'r') as f:
+        for line in f:
+            line = line.strip().split(' ')
+            qid = line[0]
+            did = line[2]
+            rel = line[3]
+            if qid not in qrels:
+                qrels[qid] = {}
+            qrels[qid][did] = rel
+    return qrels
 
 
 def main():

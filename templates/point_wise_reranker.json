@@ -1,6 +1,6 @@
 {
     "description": "Template used by vanilla point-wise LLMreranker.",
-    "prompt_input": "Determine if the given passage is relevant to the query based on the given instruction. \n\n### Instruction:\n{instruction}\n\n### Query:\n{input}\n\n### Relevance:\n",
-    "prompt_no_input": "Determine if the given passage is relevant to the query. \n\n### Query:\n{input}\n\n### Relevance:\n",
+    "prompt_input": "Determine if the given passage is relevant to the query based on the given instruction. \n\n### Instruction:\n{instruction}\n\n### Query:\n{input}\n\n### Passage:\n{passage}\n\n### Relevance:\n",
+    "prompt_no_input": "Determine if the given passage is relevant to the query. \n\n### Query:\n{input}\n\n### Passage:\n{passage}\n\n### Relevance:\n",
     "response_split": "### Response:"
 }

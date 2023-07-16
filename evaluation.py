@@ -41,11 +41,26 @@ THE_TOPICS = {
 
 }
 
+CUSTOM_TOPICS = {
+    'dl21': '/home1/cxy/trec_23/data/test_21/2021_queries.tsv',
+    'dl22': '/home1/cxy/trec_23/data/test_22/2022_queries.tsv'
+}
+
+CUSTOM_QRELS = {
+    'dl21': '/home1/cxy/trec_23/data/test_21/2021.qrels.pass.final.txt',
+    'dl22': '/home1/cxy/trec_23/data/test_22/2022.qrels.pass.withDupes.txt'
+}
+
+CUSTOM_INDEX = {
+    'dl21': 'msmarco-v2-passage',
+    'dl22': 'msmarco-v2-passage'
+}
+
 
 from pyserini.search import LuceneSearcher, get_topics, get_qrels
 from tqdm import tqdm
 import tempfile
-from rank_llama import run_retriever, sliding_windows, write_eval_file
+from rank_llama import run_retriever, sliding_windows, write_eval_file, get_custom_topics, get_custom_qrels
 
 import os
 import sys
@@ -89,16 +104,35 @@ def evaluate(
         print('#' * 20)
 
         # Retrieve passages using pyserini BM25.
-        searcher = LuceneSearcher.from_prebuilt_index(THE_INDEX[data])
-        topics = get_topics(THE_TOPICS[data] if data != 'dl20' else 'dl20')
-        qrels = get_qrels(THE_TOPICS[data])
-        rank_results = run_retriever(topics, searcher, qrels, k=100)
+        if data not in THE_INDEX:
+            print(f'Using custom index for {data}')
+            index_name = CUSTOM_INDEX[data]
+            searcher = LuceneSearcher.from_prebuilt_index(CUSTOM_INDEX[data])
+            # qrels like:{47923: {1200258: '2', 1236611: '0', 1296110: '1', 1300989: '1', 1354790: '1', 1463436: '0', 1507610: '1'}}
+            qrels = get_custom_qrels(CUSTOM_QRELS[data])
+            # topics like:{264014: {'title': 'how long is life cycle of flea'}, 104861: {'title': 'cost of interior concrete flooring'}}
+            topics = get_custom_topics(CUSTOM_TOPICS[data], qrels)
+            topic_name = CUSTOM_TOPICS[data].split('/')[-1].split('.')[0]
+        else:
+            index_name = THE_INDEX[data]
+            searcher = LuceneSearcher.from_prebuilt_index(THE_INDEX[data])
+            topics = get_topics(THE_TOPICS[data] if data != 'dl20' else 'dl20')
+            qrels = get_qrels(THE_TOPICS[data])
+        if index_name == 'msmarco-v2-passage':
+            text_is_passage = True
+        rank_results = run_retriever(topics, searcher, qrels, k=100, text_is_passage=text_is_passage)
 
         # Evaluate nDCG@10
         from trec_eval import EvalFunction
+        if not os.path.exists(f'result/{lora_weights.split("/")[-1]}'):
+            os.makedirs(f'result/{lora_weights.split("/")[-1]}')
         temp_file_bm25 = f'result/{lora_weights.split("/")[-1]}/{data}_{rank_end}_BM25.txt'
         write_eval_file(rank_results, temp_file_bm25)
-        EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data], temp_file_bm25])
+
+        if data in THE_TOPICS:
+            EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data], temp_file_bm25])
+        else:
+            EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', CUSTOM_QRELS[data], temp_file_bm25], trunc=False)
 
         # Run sliding window permutation generation
         new_results = []
@@ -106,21 +140,23 @@ def evaluate(
             # if i <200:
             #     continue
 
-            new_item = sliding_windows(item, rank_start=0, rank_end=rank_end, window_size=10, step=5,
-                                       model=model, tokenizer=tokenizer, prompter=prompter, generate_config=generate_config,
+            new_item = sliding_windows(item, rank_start=0, rank_end=rank_end, window_size=6, step=3,
+                                       model=model, tokenizer=tokenizer, prompter=prompter,
+                                       generate_config=generate_config,
                                        device=device)
             new_results.append(new_item)
             # break
 
-
         # temp_file = tempfile.NamedTemporaryFile(delete=False).name
         # the path of the temp_file is in the /result/{lora_weights}.split('/')directory on the root of the project
-        if not os.path.exists(f'result/{lora_weights.split("/")[-1]}'):
-            os.makedirs(f'result/{lora_weights.split("/")[-1]}')
+
 
         temp_file = f'result/{lora_weights.split("/")[-1]}/{data}_{rank_end}.txt'
         write_eval_file(new_results, temp_file)
-        EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data], temp_file])
+        if data in THE_TOPICS:
+            EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data], temp_file])
+        else:
+            EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', CUSTOM_QRELS[data], temp_file], trunc=False)
 
 
 def main(
@@ -129,6 +165,7 @@ def main(
         lora_weights: str = "tloen/alpaca-lora-7b",
         prompt_template: str = "",  # The prompt template to use, will default to alpaca.
         data_list: str='dl19,dl20,covid,arguana,touche,news,scifact,fiqa,scidocs,nfc,quora,dbpedia,fever,robust04,signal',
+
 ):
     if type(data_list) == str:
         data_list = data_list.split(',')
@@ -138,6 +175,13 @@ def main(
     assert (
         base_model
     ), "Please specify a --base_model, e.g. --base_model='huggyllama/llama-7b'"
+
+    print(
+        f"Using model {base_model} with {lora_weights} as the LORA weights and {prompt_template} as the prompt template."
+    )
+    print(f"Using device {device}.")
+    print(f"Using 8bit quantization: {load_8bit}.")
+    print(f"Using data list: {data_list}.")
 
 
     prompter = Prompter(prompt_template)
@@ -149,12 +193,11 @@ def main(
             torch_dtype=torch.float16,
             device_map="auto",
         )
-        print('no lora')
-        # model = PeftModel.from_pretrained(
-        #     model,
-        #     lora_weights,
-        #     torch_dtype=torch.float16,
-        # )
+        model = PeftModel.from_pretrained(
+            model,
+            lora_weights,
+            torch_dtype=torch.float16,
+        )
     elif device == "mps":
         model = LlamaForCausalLM.from_pretrained(
             base_model,

@@ -284,7 +284,7 @@ def train(
             train_on_inputs=train_on_inputs,
             add_eos_token=add_eos_token,
             cutoff_len=cutoff_len,
-        )
+)
         val_data = None
 
     if not ddp and torch.cuda.device_count() > 1:
