@@ -120,6 +120,8 @@ def evaluate(
             qrels = get_qrels(THE_TOPICS[data])
         if index_name == 'msmarco-v2-passage':
             text_is_passage = True
+        else:
+            text_is_passage = False
         rank_results = run_retriever(topics, searcher, qrels, k=100, text_is_passage=text_is_passage)
 
         # Evaluate nDCG@10
