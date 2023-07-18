@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import datasets
+from collections import defaultdict
 
 
 PROMPT_DICT = {
@@ -160,29 +161,98 @@ THE_TOPICS = {
 
 }
 
+CUSTOM_TOPICS = {
+    'dl21': '/mnt/ceph_home/data/trec/data/test_21/2021_queries.tsv',
+    'dl22': '/mnt/ceph_home/data/trec/data/test_22/2022_queries.tsv'
+}
+
+CUSTOM_QRELS = {
+    'dl21': '/mnt/ceph_home/data/trec/data/test_21/2021.qrels.pass.final.txt',
+    'dl22': '/mnt/ceph_home/data/trec/data/test_22/2022.qrels.pass.withDupes.txt'
+}
+
+CUSTOM_INIT_RUN = {
+    'dl21': '/mnt/ceph_home/data/trec/runs/test_21/run.msmarco-v2-passage.unicoil-otf.dl21.txt',
+    'dl22': '/mnt/ceph_home/data/trec/runs/test_22/run.msmarco-v2-passage.unicoil-otf.dl22.txt'
+}
+
+CUSTOM_INDEX = {
+    'dl21': '/mnt/ceph_home/data/trec/lucene-index.msmarco-v2-passage.20220808.4d6d2a.eacd8556dd416ccad517b5e7dc97bceb',
+    'dl22': '/mnt/ceph_home/data/trec/lucene-index.msmarco-v2-passage.20220808.4d6d2a.eacd8556dd416ccad517b5e7dc97bceb'
+}
+
 from pyserini.search import LuceneSearcher, get_topics, get_qrels
 from trec_eval import EvalFunction
-from rank_llama import run_retriever, write_eval_file
+from rank_llama import run_retriever, write_eval_file, get_custom_qrels, get_custom_topics, get_formatted_query_passage
 import tempfile
 import random
 import numpy as np
 import torch.nn.functional as F
 
-ms_instructions = [
-    "I want to know the answer to the question. Can you find good evidence on the web?",
-    "Retrieve a web paragraph that answers the following",
-    "Find an evidence paragraph on the web with evidence and answer for this"
-]
+eval_instructions = {
+"dl20": [
+    "Retrieve a web paragraph that answers the following."
+    ],
+"dl19": [
+    "Retrieve a web paragraph that answers the following."
+    ],
+"dl21": [
+    "Retrieve a web paragraph that answers the following."
+    ],
+"dl22": [
+    "Retrieve a web paragraph that answers the following."
+    ],
+"touche": [
+    "You have to retrieve an argument to this debate question.",
+    ],
+"dbpedia": [
+    "Retrieve a Wikipedia introduction paragraph of the following entity.",
+    ],
+"news": [
+    "Retrieve news articles that provide important context or background information.",
+    ],
+"scifact": [
+    "Retrieve a scientific paper sentence to verify if the following claim is true.",
+    ],
+"covid": [
+    "Retrieve Scientific paper paragraph to answer this question.",
+    ],
+"nfc": [
+    "Retrieve Scientific paper paragraph to answer this question.",
+    ],
+"signal": [
+    "Retrieve tweets that are relevant to the following topics.",
+    ],
+"robus04": [
+    "Retrieve news that are relevant to the following queries.",
+    ],
+}
 
 
 class RerankDevDataset(Dataset):
     """complete initial ranking, prepare for reranking"""
-    def __init__(self,  tokenizer: transformers.PreTrainedTokenizer, data_name:str):
+    def __init__(self,  tokenizer: transformers.PreTrainedTokenizer, data_name:str, use_custom_init:bool, output_dir):
         super(RerankDevDataset, self).__init__()
-        searcher = LuceneSearcher.from_prebuilt_index(THE_INDEX[data_name])
-        topics = get_topics(THE_TOPICS[data_name] if data_name != 'dl20' else 'dl20')
-        qrels = get_qrels(THE_TOPICS[data_name])
-        initial_ranking = run_retriever(topics, searcher, qrels, k=100)
+        if data_name in THE_INDEX and not use_custom_init:
+            print(f"evaluate data {data_name}, and NOT use custom init.")
+            index_name = THE_INDEX[data_name]
+            searcher = LuceneSearcher.from_prebuilt_index(index_name)
+            topics = get_topics(THE_TOPICS[data_name] if data_name != 'dl20' else 'dl20')
+            qrels = get_qrels(THE_TOPICS[data_name])
+            if index_name == 'msmarco-v2-passage':
+                text_is_passage = True
+            else:
+                text_is_passage = False
+            initial_ranking = run_retriever(topics, searcher, qrels, k=100, text_is_passage=text_is_passage)
+        elif data_name in CUSTOM_INDEX and use_custom_init:
+            print(f"evaluate data {data_name}, and use custom init {use_custom_init}.")
+            index_name = CUSTOM_INDEX[data_name]
+            searcher = LuceneSearcher(index_name)
+            qrels = get_custom_qrels(CUSTOM_QRELS[data_name])
+            topics = get_custom_topics(CUSTOM_TOPICS[data_name], qrels)
+            initial_ranking = get_formatted_query_passage(searcher, CUSTOM_INIT_RUN[data_name], topics)
+        else:
+            raise NotImplementedError(f"Dataset {data_name}  and use_custom_init {use_custom_init} not implemented")
         # initail ranking is a list
         # initail ranking[i] = [{'query': query,
         #                        'hits': [{
@@ -193,17 +263,21 @@ class RerankDevDataset(Dataset):
         #                                  'score': score
         #                                  }, ...]
         #                                  }, ...]
-        temp_file_bm25 = f'result/{data_name}_100_BM25.txt'
-        write_eval_file(rank_results, temp_file_bm25)
-        EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data_name], temp_file_bm25])
+        temp_file_bm25 = tempfile.NamedTemporaryFile(dir=output_dir, prefix=f'init_{use_custom_init}_{data_name}', delete=False).name
+        write_eval_file(initial_ranking, temp_file_bm25)
+        if data_name in THE_TOPICS:
+            EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data_name], temp_file_bm25])
+        else:
+            EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', CUSTOM_QRELS[data_name], temp_file_bm25], trunc=False)
+
         logging.warning("Formatting inputs...")
         prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
 
         sources = []
         qids = []
         docids = []
+        instruction = eval_instructions[data_name][0]
         for i in range(len(initial_ranking)):
-            instruction = random.choice(ms_instructions)
             query = initial_ranking[i]['query']
             for hit in initial_ranking[i]['hits']:
                 sources.append(prompt_input.format(query=query, instruction=instruction, passage=hit['content']))
@@ -218,7 +292,7 @@ class RerankDevDataset(Dataset):
         self.qids = data_dict['labels']["qids"]
         self.docids = data_dict['labels']["docids"]
         # save qids and docids for evaluation, temp file will be deleted after evaluation
-        self.temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False)
+        self.temp_file = tempfile.NamedTemporaryFile(mode='wb', delete=False)
         pickle.dump({'qids': self.qids, 'docids': self.docids}, self.temp_file)
         self.temp_file.close()
 
@@ -255,7 +329,7 @@ def write_compute_metrics(out_path, id_path, data_name):
 
     def compute_metrics(eval_preds):
         # read temp file
-        with open(id_path, 'rb') as f:
+        with open(id_path.name, 'rb') as f:
             ids = pickle.load(f)
         qids = ids['qids']
         docids = ids['docids']
@@ -264,14 +338,37 @@ def write_compute_metrics(out_path, id_path, data_name):
         # eval_preds[1] is a list of labels
         predictions, labels = eval_preds
         # take the softmax probability of label 1 as the prediction score for reranking
-        predictions = F.softmax(predictions, dim=1)[:, 1].tolist()
-        # rank qids and docids according to predict score
-        qids, docids, predictions = zip(*sorted(zip(qids, docids, predictions), key=lambda x: x[2], reverse=True))
+        predictions = F.softmax(torch.from_numpy(predictions), dim=1)[:, 1].tolist()
+        # for each qid rank docids according to predict score
+        qid2docid2score = defaultdict(dict)
+        for i in range(len(predictions)):
+            qid2docid2score[qids[i]][docids[i]] = predictions[i]
+        for qid in qid2docid2score:
+            qid2docid2score[qid] = sorted(qid2docid2score[qid].items(), key=lambda x: x[1], reverse=True)
 
         # write predictions to temp file
         with open(out_path, 'w') as f:
-            for i in range(len(predictions)):
-                f.write(f'{qids[i]} Q0 {docids[i]} {i+1} {predictions[i]} rerank\n')
+            for qid in qid2docid2score:
+                for rank, item in enumerate(qid2docid2score[qid]):
+                    f.write(f'{qid} Q0 {item[0]} {rank+1} {item[1]} rerank\n')
         # compute metrics
-        return EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data_name], out_path])
+        if data_name in THE_TOPICS:
+            ndcg_10 = EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', THE_TOPICS[data_name], out_path])
+            ndcg_5 = EvalFunction.eval(['-c', '-m', 'ndcg_cut.5', THE_TOPICS[data_name], out_path])
+            ndcg_100 = EvalFunction.eval(['-c', '-m', 'ndcg_cut.100', THE_TOPICS[data_name], out_path])
+        else:
+            ndcg_10 = EvalFunction.eval(['-c', '-m', 'ndcg_cut.10', CUSTOM_QRELS[data_name], out_path], trunc=False)
+            ndcg_5 = EvalFunction.eval(['-c', '-m', 'ndcg_cut.5', CUSTOM_QRELS[data_name], out_path], trunc=False)
+            ndcg_100 = EvalFunction.eval(['-c', '-m', 'ndcg_cut.100', CUSTOM_QRELS[data_name], out_path], trunc=False)
+
+
+
+        metric_dict = {
+            'ndcg_10': ndcg_10,
+            'ndcg_5': ndcg_5,
+            'ndcg_100': ndcg_100
+        }
+        return metric_dict
+
+    return compute_metrics
 

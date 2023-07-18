@@ -240,8 +240,8 @@ def permutation_pipeline(item=None, rank_start=0, rank_end=100, model=None, toke
     # count time for each step
 
     time_start = time.time()
-    # messages = create_permutation_instruction(item=item, rank_start=rank_start, rank_end=rank_end, prompter=prompter, tokenizer=tokenizer)
-    messages = create_wtf_permutation_instruction(item=item, rank_start=rank_start, rank_end=rank_end, prompter=prompter, tokenizer=tokenizer)
+    messages = create_permutation_instruction(item=item, rank_start=rank_start, rank_end=rank_end, prompter=prompter, tokenizer=tokenizer)
+    # messages = create_wtf_permutation_instruction(item=item, rank_start=rank_start, rank_end=rank_end, prompter=prompter, tokenizer=tokenizer)
     time_end = time.time()
     print(f'create_permutation_instruction takes {time_end - time_start} seconds')
     # print(f'messages is {messages}')
@@ -311,6 +311,74 @@ def get_custom_qrels(qrels_file):
                 qrels[qid] = {}
             qrels[qid][did] = rel
     return qrels
+
+
+def read_retrieval_results(retrieval_results_file):
+    '''
+
+    :param retrieval_results_file: lines of retrieval results like: 2082 Q0 msmarco_passage_49_486599463 1 1373.633789 Anserini
+    :return:
+    '''
+    retrieval_results = {}
+    with open(retrieval_results_file, 'r') as f:
+        for line in f:
+            line = line.strip().split()
+            qid = line[0]
+            pid = line[2]
+            rank = int(line[3])
+            score = float(line[4])
+            tag = line[5]
+            if qid not in retrieval_results:
+                retrieval_results[qid] = {}
+            retrieval_results[qid][pid] = (rank, score, tag)
+    return retrieval_results
+
+
+def get_text_from_index(searcher, pid):
+    doc = searcher.doc(pid)
+    raw_text = doc.raw()
+    data = json.loads(raw_text)
+    return data['passage']
+
+
+def get_formatted_query_passage(searcher, run_path, queries, ):
+    '''
+
+    :param queries:{264014: {'title': 'how long is life cycle of flea'}, 104861: {'title': 'cost of interior concrete flooring'}}
+    :param run_path: including lines of retrieval results like: 2082 Q0 msmarco_passage_49_486599463 1 1373.633789 Anserini
+    :return: ranking
+    ranking[i] = [{'query': query,
+                                'hits': [{
+                                          'content': content,
+                                          'qid': qid,
+                                          'docid': docid,
+                                          'rank': rank,
+                                          'score': score
+                                          }, ...]
+                                          }, ...]
+    '''
+
+    ranking = []
+    retrieval_results = read_retrieval_results(run_path)
+    for qid in tqdm(queries):
+        query = queries[qid]['title']
+        hits = []
+        for pid in retrieval_results[qid]:
+            rank, score, tag = retrieval_results[qid][pid]
+            content = get_text_from_index(searcher, pid)
+            hits.append({'content': content,
+                         'qid': qid,
+                         'docid': pid,
+                         'rank': rank,
+                         'score': score
+                         })
+        ranking.append({'query': query,
+                        'hits': hits
+                        })
+    return ranking
+
+
+
 
 
 def main():

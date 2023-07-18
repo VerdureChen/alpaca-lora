@@ -107,10 +107,14 @@ class EvalFunction:
             print(stderr.decode("utf-8"))
 
         print('Results:')
-        print(stdout.decode("utf-8").rstrip())
+        sout = stdout.decode("utf-8").rstrip()
+        print(sout)
+        # cast sout to dict
+        metric, _, value = sout.split('\n')[-1].split('\t')
 
-        for judged in judged_result:
-            print(judged)
+        # for judged in judged_result:
+        #     print(judged)
 
         if temp_file:
             os.remove(temp_file)
+        return {metric: float(value)}
